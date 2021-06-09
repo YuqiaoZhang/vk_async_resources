@@ -81,6 +81,7 @@ public:
   uint32_t         m_queueFamily         = ~0;
   VkQueue          m_queueTransfer       = VK_NULL_HANDLE;
   uint32_t         m_queueTransferFamily = ~0;
+  bool             m_has_transfer_queue = false;
   // ---------------------------------------------------------
   // generic utilities
   nvvk::ProfilerVK          m_profilerVK;
@@ -122,6 +123,8 @@ public:
     nvvk::BufferDma viewUbo;
     nvvk::BufferDma geoVbo;
     nvvk::BufferDma geoIbo;
+    VkDeviceSize vboSize;
+    VkDeviceSize iboSize;
 
     nvvk::AllocatorDma allocatorDma;
 
@@ -149,6 +152,9 @@ public:
     m_queueFamily         = context.m_queueGCT.familyIndex;
     m_queueTransfer       = context.m_queueT.queue;
     m_queueTransferFamily = context.m_queueT.familyIndex;
+    //assert(m_queueTransfer != NULL);
+    //assert(m_queueTransferFamily != VK_QUEUE_FAMILY_IGNORED);
+    m_has_transfer_queue = (m_queueTransfer != NULL) && (m_queueTransferFamily != VK_QUEUE_FAMILY_IGNORED);
 
     m_ringFences.init(m_device);
     m_ringCmdPool.init(m_device, m_queueFamily, VK_COMMAND_POOL_CREATE_TRANSIENT_BIT);
@@ -156,7 +162,7 @@ public:
     m_submission.init(m_queue);
 
     m_shaderManager.init(m_device);
-    m_shaderManager.m_filetype = nvh::ShaderFileManager::FILETYPE_GLSL;
+    m_shaderManager.m_filetype = nvh::ShaderFileManager::FILETYPE_SPIRV;
 
     m_shaderManager.addDirectory(std::string(PROJECT_NAME));
     m_shaderManager.addDirectory(std::string("GLSL_" PROJECT_NAME));
@@ -213,7 +219,10 @@ public:
     m_test.allocatorDma.getStaging()->setFreeUnusedOnRelease(false);
 
     // command pool for async transfers
-    m_test.transferCmdPool.init(m_device, m_queueTransferFamily);
+    if (m_has_transfer_queue)
+    {
+      m_test.transferCmdPool.init(m_device, m_queueTransferFamily);
+    }
 
     VkSemaphoreCreateInfo semInfo = nvvk::make<VkSemaphoreCreateInfo>();
     vkCreateSemaphore(m_device, &semInfo, nullptr, &m_test.transferSemaphore);
@@ -252,9 +261,9 @@ public:
 
       m_shaderManager.registerInclude("common.h", "common.h");
 
-      m_test.moduleVS = m_shaderManager.createShaderModule(VK_SHADER_STAGE_VERTEX_BIT, "test.vert.glsl");
+      m_test.moduleVS = m_shaderManager.createShaderModule(VK_SHADER_STAGE_VERTEX_BIT, "test.vert.spv");
       assert(m_shaderManager.isValid(m_test.moduleVS));
-      m_test.moduleFS = m_shaderManager.createShaderModule(VK_SHADER_STAGE_FRAGMENT_BIT, "test.frag.glsl");
+      m_test.moduleFS = m_shaderManager.createShaderModule(VK_SHADER_STAGE_FRAGMENT_BIT, "test.frag.spv");
       assert(m_shaderManager.isValid(m_test.moduleFS));
 
       // we use a dedicated function to enable hot-reloading of shaders
@@ -268,10 +277,11 @@ public:
 
   void initTestGeometry(uint32_t subdiv)
   {
-    nvh::geometry::Torus<Vertex> torus(subdiv * 32, subdiv * 32);
+    // static eliminate flickering
+    static nvh::geometry::Torus<Vertex> torus(subdiv * 32, subdiv * 32);
 
-    VkDeviceSize vboSize = torus.getVerticesSize();
-    VkDeviceSize iboSize = torus.getTriangleIndicesSize();
+    m_test.vboSize = torus.getVerticesSize();
+    m_test.iboSize = torus.getTriangleIndicesSize();
     const void*  vboData = (const void*)torus.m_vertices.data();
     const void*  iboData = (const void*)torus.m_indicesTriangles.data();
 
@@ -282,7 +292,7 @@ public:
     drawCmd.instanceCount                = 1024 / subdiv;  // to create some reasonable load
     m_test.drawCmds.push_back(drawCmd);
 
-    if(m_test.useAsync)
+    if (m_has_transfer_queue && m_test.useAsync)
     {
       // use simplified AllocatorDma wrapper class for resource creation and staging upload
 
@@ -306,8 +316,18 @@ public:
       job.cmd = m_test.transferCmdPool.createCommandBuffer();
       {
         auto timeOnce = m_profilerVK.timeSingle("Upload", job.cmd, true);
-        m_test.geoVbo = m_test.allocatorDma.createBuffer(job.cmd, vboSize, vboData, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-        m_test.geoIbo = m_test.allocatorDma.createBuffer(job.cmd, iboSize, iboData, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+        m_test.geoVbo = m_test.allocatorDma.createBuffer(job.cmd, m_test.vboSize, vboData, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+        m_test.geoIbo = m_test.allocatorDma.createBuffer(job.cmd, m_test.iboSize, iboData, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+      }
+
+      // Queue Family Ownership Transfer
+      // release operation
+      if (m_queueTransferFamily != m_queueFamily)
+      {
+        VkBufferMemoryBarrier memBarriers[] = {
+            {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER, NULL, VK_ACCESS_TRANSFER_WRITE_BIT, 0, m_queueTransferFamily, m_queueFamily, m_test.geoVbo.buffer, 0, m_test.vboSize},
+            {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER, NULL, VK_ACCESS_TRANSFER_WRITE_BIT, 0, m_queueTransferFamily, m_queueFamily, m_test.geoIbo.buffer, 0, m_test.iboSize}};
+        vkCmdPipelineBarrier(job.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, sizeof(memBarriers) / sizeof(memBarriers[0]), memBarriers, 0, NULL);
       }
 
       vkEndCommandBuffer(job.cmd);
@@ -321,6 +341,9 @@ public:
       vkQueueSubmit(m_queueTransfer, 1, &submitInfo, job.fence);
 
       // next graphics submission must wait for transfer completion
+      // ---
+      // Queue Family Ownership Transfer
+      // execution dependency
       m_submission.enqueueWait(job.semaphore, VK_PIPELINE_STAGE_TRANSFER_BIT);
     }
     else
@@ -334,11 +357,11 @@ public:
         auto                     timeOnce = m_profilerVK.timeSingle("Upload", cmd);
 
         // showcases individual subsystem usage, not using AllocatorDMA
-        m_test.geoVbo.buffer = m_memAllocator.createBuffer(vboSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, m_test.geoVbo.allocation);
-        m_test.geoIbo.buffer = m_memAllocator.createBuffer(iboSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, m_test.geoIbo.allocation);
+        m_test.geoVbo.buffer = m_memAllocator.createBuffer(m_test.vboSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, m_test.geoVbo.allocation);
+        m_test.geoIbo.buffer = m_memAllocator.createBuffer(m_test.iboSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, m_test.geoIbo.allocation);
 
-        staging.cmdToBuffer(cmd, m_test.geoVbo.buffer, 0, vboSize, vboData);
-        staging.cmdToBuffer(cmd, m_test.geoIbo.buffer, 0, iboSize, iboData);
+        staging.cmdToBuffer(cmd, m_test.geoVbo.buffer, 0, m_test.vboSize, vboData);
+        staging.cmdToBuffer(cmd, m_test.geoIbo.buffer, 0, m_test.iboSize, iboData);
 
         // no need to "finalize or release" for staging
         // since we release all intermediate resources at staging destructor anyway
@@ -569,7 +592,7 @@ public:
 
       initTestGeometry(1 + ((m_frame / 4) % 2));
 
-      if(!m_test.useAsync)
+      if (!(m_has_transfer_queue && m_test.useAsync))
       {
         // delete directly due to sync'ed behavior
         deleteAsyncJobResources(m_test.transfer);
@@ -591,6 +614,17 @@ public:
     VkCommandBuffer cmd =
         m_ringCmdPool.createCommandBuffer(VK_COMMAND_BUFFER_LEVEL_PRIMARY, true, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
     {
+
+      // Queue Family Ownership Transfer
+      // acquire operation
+      if ((m_queueTransferFamily != m_queueFamily) && m_submission.hasWaitSem(m_test.transferSemaphore))
+      {
+        VkBufferMemoryBarrier memBarriers[] = {
+            {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER, NULL, 0, VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT, m_queueTransferFamily, m_queueFamily, m_test.geoVbo.buffer, 0, m_test.vboSize},
+            {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER, NULL, 0, VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT, m_queueTransferFamily, m_queueFamily, m_test.geoIbo.buffer, 0, m_test.iboSize}};
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 0, NULL, sizeof(memBarriers) / sizeof(memBarriers[0]), memBarriers, 0, NULL);
+      }
+
       // draw test
       {
         auto scopeTimer = m_profilerVK.timeRecurring("Draw", cmd);
@@ -626,11 +660,10 @@ public:
     m_submission.execute(m_ringFences.getFence());
     m_profilerVK.endFrame();
 
-    if(m_test.useAsync)
+    if (m_has_transfer_queue && m_test.useAsync)
     {
       tryCleanupAsyncJob(m_test.transfer);
     }
-
 
     // print some stats
     if(m_profilerVK.getTotalFrames() % 64 == 0)
@@ -859,11 +892,17 @@ int main(int argc, const char** argv)
     VkPhysicalDeviceHostQueryResetFeaturesEXT hostResetFeatures = nvvk::make<VkPhysicalDeviceHostQueryResetFeaturesEXT>();
     contextInfo.addDeviceExtension(VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME, false, &hostResetFeatures);
 
+    // Intel only has 1 queue
     // fake optional extension for illustration
-    VkPhysicalDeviceMeshShaderFeaturesNV          meshFeatures = nvvk::make<VkPhysicalDeviceMeshShaderFeaturesNV>();
-    VkPhysicalDeviceDescriptorIndexingFeaturesEXT indexingFeatures = nvvk::make<VkPhysicalDeviceDescriptorIndexingFeaturesEXT>();
-    contextInfo.addDeviceExtension(VK_NV_MESH_SHADER_EXTENSION_NAME, true, &meshFeatures);
-    contextInfo.addDeviceExtension(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME, true, &indexingFeatures);
+
+    // NVIDIA
+    // VkPhysicalDeviceMeshShaderFeaturesNV          meshFeatures = nvvk::make<VkPhysicalDeviceMeshShaderFeaturesNV>();
+    // VkPhysicalDeviceDescriptorIndexingFeaturesEXT indexingFeatures = nvvk::make<VkPhysicalDeviceDescriptorIndexingFeaturesEXT>();
+    // contextInfo.addDeviceExtension(VK_NV_MESH_SHADER_EXTENSION_NAME, true, &meshFeatures);
+    // contextInfo.addDeviceExtension(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME, true, &indexingFeatures);
+
+    // AMD
+    contextInfo.addDeviceExtension(VK_AMD_GCN_SHADER_EXTENSION_NAME, false); 
 
     if(!context.init(contextInfo))
     {

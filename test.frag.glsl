@@ -27,22 +27,16 @@
 
 #version 440
 
-#extension GL_GOOGLE_include_directive : enable
-#include "common.h"
-
-layout(location=0) in Interpolants {
-  vec3 pos;
-  vec3 normal;
-  vec2 tex;
-} IN;
+layout(location=1) in vec3 IN_normal;
+layout(location=2) in vec2 IN_tex;
 
 layout(location=0,index=0) out vec4 out_Color;
 
 void main()
 {
   vec3  light = normalize(vec3(0,2,-2));
-  float intensity = abs(dot(normalize(IN.normal),light));
-  vec4  color = vec4(0.75) + vec4( fract(IN.tex*32), 1, 1) * 0.25;
+  float intensity = max(dot(normalize(IN_normal),light),0);
+  vec4  color = vec4(0.75) + vec4( fract(IN_tex*32), 1, 1) * 0.25;
   
   out_Color = color * intensity;
 }

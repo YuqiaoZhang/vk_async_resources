@@ -56,6 +56,17 @@ add_definitions(-DCSF_ZIP_SUPPORT=1)
 file(GLOB SOURCE_FILES *.cpp *.hpp *.inl *.h *.c)
 file(GLOB GLSL_FILES *.glsl)
 
+if(EXISTS ${BASE_DIRECTORY}/shared_sources/cmake/utilities.cmake)
+  include(${BASE_DIRECTORY}/shared_sources/cmake/utilities.cmake)
+else()
+  message(FATAL_ERROR "could not find base directory, please set BASE_DIRECTORY to folder containing shared_sources")
+endif()
+
+compile_glsl_directory(
+    SRC "${CMAKE_CURRENT_SOURCE_DIR}" 
+    DST "${CMAKE_CURRENT_SOURCE_DIR}" 
+    VULKAN_TARGET "vulkan1.1"
+    )
 
 #####################################################################################
 # Executable

@@ -27,27 +27,28 @@
 
 #version 440
 
-#extension GL_GOOGLE_include_directive : enable
-#include "common.h"
+#define DSET_SCENE              0
+#define DSET_SCENE_UBO_VIEW     0
+
+#define VERTEX_POS    0
+#define VERTEX_NORMAL 1
+#define VERTEX_TEX    2
 
 in layout(location=VERTEX_POS)    vec3 pos;
 in layout(location=VERTEX_NORMAL) vec3 normal;
 in layout(location=VERTEX_TEX)    vec2 tex;
 
-layout(location=0) out Interpolants {
-  vec3 pos;
-  vec3 normal;
-  vec2 tex;
-} OUT;
+layout(location=1) out vec3 OUT_normal;
+layout(location=2) out vec2 OUT_tex;
 
-layout(set=DSET_SCENE, binding=DSET_SCENE_UBO_VIEW, std140) uniform viewBuffer {
-  ViewData   view;
+layout(set=DSET_SCENE, binding=DSET_SCENE_UBO_VIEW, column_major) uniform _unused_name_ubuf
+{
+  mat4  viewProjMatrix;
 };
 
 void main()
 {
-  gl_Position = view.viewProjMatrix * vec4(pos,1);
-  OUT.pos = pos;
-  OUT.normal = normal;
-  OUT.tex = tex;
+  gl_Position = viewProjMatrix * vec4(pos,1);
+  OUT_normal = normal;
+  OUT_tex = tex;
 }
